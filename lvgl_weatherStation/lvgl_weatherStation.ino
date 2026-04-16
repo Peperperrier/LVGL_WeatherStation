@@ -1,4 +1,3 @@
-
 /*  Install the "lvgl" library version 9.2 by kisvegabor to interface with the TFT Display - https://lvgl.io/
     *** IMPORTANT: lv_conf.h available on the internet will probably NOT work with the examples available at Random Nerd Tutorials ***
     *** YOU MUST USE THE lv_conf.h FILE PROVIDED IN THE LINK BELOW IN ORDER TO USE THE EXAMPLES FROM RANDOM NERD TUTORIALS ***
@@ -32,8 +31,8 @@ TOUCHINFO touch_info;
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
-const char* WIFI_SSID = "wwt-IoT";
-const char* WIFI_PASS = "test1234";
+const char* WIFI_SSID = "Your_SSID";
+const char* WIFI_PASS = "Your_PASSWORD";
 
 void connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -45,84 +44,126 @@ void connectWiFi() {
   Serial.println("\nWiFi connecté !");
 }
 
-//* ** FORECAST *** //
-String weather_text = "Chargement...";
-float weather_temp = 0;
+// *** FORECAST *** //
+float weather_temp_current  = 0;   // température actuelle
+float weather_temp_min      = 0;
+float weather_temp_max      = 0;
+int   weather_code_morning  = 0;   // code à 08h00
+int   weather_code_afternoon = 0;  // code à 14h00
 
-String decodeWeatherCode(int code) {
-  switch(code) {
-    case 0: return "Ciel clair";
-    case 1: case 2: return "Partiellement nuageux";
-    case 3: return "Nuageux";
-    case 45: case 48: return "Brouillard";
-    case 51: case 53: case 55: return "Bruine";
-    case 61: case 63: case 65: return "Pluie";
-    case 71: case 73: case 75: return "Neige";
-    case 95: return "Orage";
-    default: return "Inconnu";
-  }
+// Retourne un symbole texte court compatible avec toutes les polices LVGL
+// (les emojis Unicode couleur nécessitent une police spéciale — on utilise ici
+//  des caractères ASCII/Latin qui s'affichent sur n'importe quelle config)
+const char* weatherSymbol(int code) {
+  if (code == 0)                      return "Soleil";
+  if (code <= 2)                      return "Eclair.";
+  if (code == 3)                      return "Nuageux";
+  if (code == 45 || code == 48)       return "Brouill.";
+  if (code >= 51 && code <= 55)       return "Bruine";
+  if (code >= 61 && code <= 65)       return "Pluie";
+  if (code >= 71 && code <= 75)       return "Neige";
+  if (code == 95)                     return "Orage";
+  return "?";
 }
+
+// Si votre police LVGL supporte les emojis UTF-8, remplacez weatherSymbol() par :
+// const char* weatherEmoji(int code) {
+//   if (code == 0)                    return "\xE2\x98\x80";  // ☀
+//   if (code <= 2)                    return "\xE2\x9B\x85";  // ⛅
+//   if (code == 3)                    return "\xE2\x98\x81";  // ☁
+//   if (code == 45 || code == 48)     return "\U0001F32B";    // 🌫
+//   if (code >= 51 && code <= 55)     return "\U0001F326";    // 🌦
+//   if (code >= 61 && code <= 65)     return "\U0001F327";    // 🌧
+//   if (code >= 71 && code <= 75)     return "\U00002744";    // ❄
+//   if (code == 95)                   return "\U000026C8";    // ⛈
+//   return "?";
+// }
 
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient http;
-  http.begin("https://api.open-meteo.com/v1/forecast?latitude=44.987&longitude=3.916&current_weather=true");
+  // current_weather : température instantanée
+  // daily           : min/max de DEMAIN (index 1, forecast_days=2)
+  // hourly          : weathercode de DEMAIN (index 32 = 08h, index 38 = 14h du jour J+1)
+  http.begin("https://api.open-meteo.com/v1/forecast"
+             "?latitude=44.987&longitude=3.916"
+             "&current_weather=true"
+             "&daily=temperature_2m_min,temperature_2m_max"
+             "&hourly=weathercode"
+             "&timezone=Europe%2FParis"
+             "&forecast_days=2");
 
   int httpCode = http.GET();
   if (httpCode == 200) {
     String payload = http.getString();
 
-    StaticJsonDocument<512> doc;
+    // Buffer agrandi : 2 jours hourly = 48 valeurs + current + daily
+    StaticJsonDocument<4096> doc;
     deserializeJson(doc, payload);
 
-    float temp = doc["current_weather"]["temperature"];
-    int code = doc["current_weather"]["weathercode"];
+    // Température actuelle
+    weather_temp_current    = doc["current_weather"]["temperature"];
 
-    weather_temp = temp;
-    weather_text = decodeWeatherCode(code);
+    // Min/Max d'AUJOURD'HUI (index 0 dans daily)
+    weather_temp_min        = doc["daily"]["temperature_2m_min"][0];
+    weather_temp_max        = doc["daily"]["temperature_2m_max"][0];
 
-    Serial.println("Météo mise à jour !");
+    // Codes météo de DEMAIN :
+    // hourly index 0..23 = aujourd'hui, 24..47 = demain
+    // index 24+8 = 32 => 08h demain, 24+14 = 38 => 14h demain
+    weather_code_morning    = doc["hourly"]["weathercode"][32];
+    weather_code_afternoon  = doc["hourly"]["weathercode"][38];
+
+    Serial.printf("Actuelle: %.1f°C  Demain Min: %.1f°C  Max: %.1f°C  Matin: %d  AM: %d\n",
+      weather_temp_current,
+      weather_temp_min, weather_temp_max,
+      weather_code_morning, weather_code_afternoon);
+  } else {
+    Serial.printf("Erreur HTTP: %d\n", httpCode);
   }
   http.end();
 }
 
-//* ** DISPLAY *** //
-// Example temperature history in Celsius
+// *** DISPLAY *** //
+// Historique de températures exemple (Celsius)
 static const int16_t temp_history[] = {22, 23, 24, 25, 24, 26, 27, 28, 27, 26, 25, 24, 23, 22, 21};
 static const size_t temp_history_count = sizeof(temp_history) / sizeof(temp_history[0]);
 
-// Touchscreen coordinates: (x, y) and pressure (z)
+// Coordonnées tactiles : (x, y) et pression (z)
 int x, y, z;
 
 #define DRAW_BUF_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / 10 * (LV_COLOR_DEPTH / 8))
 uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 
-// If logging is enabled, it will inform the user about what is happening in the library
+// Pointeurs globaux vers les éléments à mettre à jour dynamiquement
+static lv_obj_t * header_title;
+static lv_obj_t * card_temp_lbl;
+static lv_obj_t * card_min_lbl;
+static lv_obj_t * card_max_lbl;
+static lv_obj_t * slider_label;
+
+// Logs LVGL vers le moniteur série
 void log_print(lv_log_level_t level, const char * buf) {
   LV_UNUSED(level);
   Serial.println(buf);
   Serial.flush();
 }
 
-// Get the Touchscreen data from the FT6336 controller via bb_captouch
+// Lecture du tactile via bb_captouch / FT6336
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
   if (touch.getSamples(&touch_info) && touch_info.count > 0) {
     x = touch_info.x[0];
     y = touch_info.y[0];
     z = touch_info.pressure[0];
 
-    if (TOUCH_MIRROR_X) {
-      x = SCREEN_WIDTH - x;
-    }
-    if (TOUCH_MIRROR_Y) {
-      y = SCREEN_HEIGHT - y;
-    }
+    if (TOUCH_MIRROR_X) x = SCREEN_WIDTH  - x;
+    if (TOUCH_MIRROR_Y) y = SCREEN_HEIGHT - y;
 
     x = constrain(x, 0, SCREEN_WIDTH);
     y = constrain(y, 0, SCREEN_HEIGHT);
 
-    data->state = LV_INDEV_STATE_PRESSED;
+    data->state   = LV_INDEV_STATE_PRESSED;
     data->point.x = x;
     data->point.y = y;
   } else {
@@ -130,54 +171,55 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
   }
 }
 
-int btn1_count = 0;
-// Callback that is triggered when btn1 is clicked
-static void event_handler_btn1(lv_event_t * e) {
-  lv_event_code_t code = lv_event_get_code(e);
-  if(code == LV_EVENT_CLICKED) {
-    btn1_count++;
-    LV_LOG_USER("Button clicked %d", (int)btn1_count);
+// Met à jour le header et les cards avec les données météo fraîches
+void updateWeatherDisplay() {
+  // Header : "Soleil / Pluie   12° / 28°"
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%s / %s   %.0f° / %.0f°",
+    weatherSymbol(weather_code_morning),
+    weatherSymbol(weather_code_afternoon),
+    weather_temp_min,
+    weather_temp_max);
+  lv_label_set_text(header_title, buf);
+
+  // Card Temp actuelle
+  char scur[12];
+  snprintf(scur, sizeof(scur), "%.1f°C", weather_temp_current);
+  lv_label_set_text(card_temp_lbl, scur);
+
+  // Card Min demain
+  char smin[12];
+  snprintf(smin, sizeof(smin), "%.1f°C", weather_temp_min);
+  lv_label_set_text(card_min_lbl, smin);
+
+  // Card Max demain
+  char smax[12];
+  snprintf(smax, sizeof(smax), "%.1f°C", weather_temp_max);
+  lv_label_set_text(card_max_lbl, smax);
+}
+
+// Callback bouton Action : rafraîchit la météo
+static void action_btn_event(lv_event_t * e) {
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    fetchWeather();
+    updateWeatherDisplay();
   }
 }
 
-// Callback that is triggered when btn2 is clicked/toggled
-static void event_handler_btn2(lv_event_t * e) {
-  lv_event_code_t code = lv_event_get_code(e);
-  lv_obj_t * obj = (lv_obj_t*) lv_event_get_target(e);
-  if(code == LV_EVENT_VALUE_CHANGED) {
-    LV_UNUSED(obj);
-    LV_LOG_USER("Toggled %s", lv_obj_has_state(obj, LV_STATE_CHECKED) ? "on" : "off");
-  }
-}
-
-static lv_obj_t * slider_label;
-// Callback that prints the current slider value on the TFT display and Serial Monitor for debugging purposes
+// Callback slider (affichage valeur)
 static void slider_event_callback(lv_event_t * e) {
   lv_obj_t * slider = (lv_obj_t*) lv_event_get_target(e);
   char buf[8];
   lv_snprintf(buf, sizeof(buf), "%d%%", (int)lv_slider_get_value(slider));
   lv_label_set_text(slider_label, buf);
   lv_obj_align_to(slider_label, slider, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-  LV_LOG_USER("Slider changed to %d%%", (int)lv_slider_get_value(slider));
-}
-
-static lv_obj_t * header_title;
-
-static void action_btn_event(lv_event_t * e) {
-  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-    fetchWeather();
-
-    char meteo_buf[64];
-    snprintf(meteo_buf, sizeof(meteo_buf), "%.1f°C - %s", weather_temp, weather_text.c_str());
-    lv_label_set_text(header_title, meteo_buf);
-  }
 }
 
 void lv_create_main_gui(void) {
 
   /* ----------- CONTENEUR PRINCIPAL EN COLONNE ----------- */
   lv_obj_t * main = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(main, SCREEN_HEIGHT - 10, SCREEN_WIDTH);  // largeur réduite
+  lv_obj_set_size(main, SCREEN_HEIGHT - 10, SCREEN_WIDTH);
   lv_obj_align(main, LV_ALIGN_TOP_MID, 0, 0);
 
   lv_obj_set_flex_flow(main, LV_FLEX_FLOW_COLUMN);
@@ -187,7 +229,6 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_bg_opa(main, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(main, 0, 0);
 
-  // Scroll pour éviter le centrage automatique
   lv_obj_set_scroll_dir(main, LV_DIR_VER);
   lv_obj_set_scroll_snap_y(main, LV_SCROLL_SNAP_START);
   lv_obj_scroll_to_y(main, 0, LV_ANIM_OFF);
@@ -199,19 +240,18 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(header, 0, 0);
 
+  // Label météo (symbole matin/PM + min/max) — mis à jour après fetchWeather()
   lv_obj_t * title = lv_label_create(header);
-  char meteo_buf[64];
-  snprintf(meteo_buf, sizeof(meteo_buf), "waiting for weather...");
-  lv_label_set_text(title, meteo_buf);
+  lv_label_set_text(title, "chargement...");
   lv_obj_align(title, LV_ALIGN_LEFT_MID, 10, 0);
-  header_title = title; // mémorise le label pour mise à jour
-
-  lv_obj_t * time_lbl = lv_label_create(header);
-  lv_label_set_text(time_lbl, "12:45");
-  lv_obj_align(time_lbl, LV_ALIGN_RIGHT_MID, -10, 0);
-
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
-  lv_obj_set_style_text_color(time_lbl, lv_color_hex(0xd3def0), 0);
+  header_title = title;   // pointeur global
+
+  // Label fixe "demain" à droite du header
+  lv_obj_t * time_lbl = lv_label_create(header);
+  lv_label_set_text(time_lbl, "demain");
+  lv_obj_align(time_lbl, LV_ALIGN_RIGHT_MID, -10, 0);
+  lv_obj_set_style_text_color(time_lbl, lv_color_hex(0xD3DEF0), 0);
 
   /* ---------------- CARDS ---------------- */
   lv_obj_t * card_container = lv_obj_create(main);
@@ -221,7 +261,8 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_bg_opa(card_container, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(card_container, 0, 0);
 
-  auto make_card = [&](const char * title, const char * value) {
+  // Fonction lambda pour créer une card et retourner son label valeur
+  auto make_card = [&](const char * card_title, const char * init_value, lv_obj_t ** out_val_lbl) {
     lv_obj_t * card = lv_obj_create(card_container);
     lv_obj_set_size(card, 90, 70);
     lv_obj_set_style_radius(card, 12, 0);
@@ -230,30 +271,30 @@ void lv_create_main_gui(void) {
     lv_obj_set_style_border_width(card, 0, 0);
 
     lv_obj_t * lbl1 = lv_label_create(card);
-    lv_label_set_text(lbl1, title);
+    lv_label_set_text(lbl1, card_title);
     lv_obj_align(lbl1, LV_ALIGN_TOP_MID, 0, 5);
+    lv_obj_set_style_text_color(lbl1, lv_color_white(), 0);
 
     lv_obj_t * lbl2 = lv_label_create(card);
-    lv_label_set_text(lbl2, value);
+    lv_label_set_text(lbl2, init_value);
     lv_obj_align(lbl2, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_obj_set_style_text_color(lbl2, lv_color_white(), 0);
 
-  lv_obj_set_style_text_color(lbl1, lv_color_white(), 0);
-  lv_obj_set_style_text_color(lbl2, lv_color_white(), 0);
-
-
+    if (out_val_lbl) *out_val_lbl = lbl2;   // expose le label valeur si demandé
     return card;
   };
 
-  make_card("Temp", "24,2°C");
-  make_card("Min.", "-11,5°C");
-  make_card("Max", "31,4°C");
+  // Card Temp actuelle — pointeur global pour updateWeatherDisplay()
+  make_card("Temp", "--.-°C", &card_temp_lbl);
 
+  // Cards Min et Max demain — pointeurs globaux pour updateWeatherDisplay()
+  make_card("Min.", "--.-°C", &card_min_lbl);
+  make_card("Max",  "--.-°C", &card_max_lbl);
 
   /* ---------------- GRAPHIQUE ---------------- */
   lv_obj_t * chart = lv_chart_create(main);
-  //lv_obj_set_size(chart, SCREEN_HEIGHT - 20, 150);
   lv_obj_set_size(chart, SCREEN_HEIGHT, 150);
-  lv_obj_center(chart);   // force le centrage dans le conteneur
+  lv_obj_center(chart);
 
   lv_obj_set_style_bg_color(chart, lv_color_hex(0x1E1E2F), 0);
   lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, 0);
@@ -276,8 +317,7 @@ void lv_create_main_gui(void) {
     lv_chart_set_next_value(chart, s, temp_history[i]);
   }
 
-
-  /* ---------------- CONTROLS ----------------*/ 
+  /* ---------------- CONTROLS ---------------- */
   lv_obj_t * ctrl_container = lv_obj_create(main);
   lv_obj_set_size(ctrl_container, SCREEN_HEIGHT, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(ctrl_container, LV_FLEX_FLOW_COLUMN);
@@ -291,29 +331,32 @@ void lv_create_main_gui(void) {
   lv_obj_t * slider = lv_slider_create(ctrl_container);
   lv_obj_set_width(slider, SCREEN_HEIGHT - 40);
   lv_slider_set_range(slider, 0, 100);
+  lv_obj_add_event_cb(slider, slider_event_callback, LV_EVENT_VALUE_CHANGED, NULL);
+
+  slider_label = lv_label_create(ctrl_container);
+  lv_label_set_text(slider_label, "0%");
 
   lv_obj_t * btn = lv_button_create(ctrl_container);
   lv_obj_set_size(btn, 120, 40);
   lv_obj_t * lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, "Action");
+  lv_label_set_text(lbl, "Actualiser");
   lv_obj_center(lbl);
   lv_obj_add_event_cb(btn, action_btn_event, LV_EVENT_CLICKED, NULL);
-  
-  lv_obj_scroll_to_y(main, -100, LV_ANIM_OFF);
 
+  lv_obj_scroll_to_y(main, -100, LV_ANIM_OFF);
 }
 
 void setup() {
-  String LVGL_Arduino = String("LVGL Library Version: ") + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
   Serial.begin(115200);
+  String LVGL_Arduino = String("LVGL Library Version: ")
+    + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
   Serial.println(LVGL_Arduino);
-  
-  // Start LVGL
+
+  // Démarrage LVGL
   lv_init();
-  // Register print function for debugging
   lv_log_register_print_cb(log_print);
 
-  // Initialize FT6336 touch controller using bb_captouch
+  // Initialisation du contrôleur tactile FT6336 via bb_captouch
   if (touch.init(TOUCH_SDA, TOUCH_SCL, TOUCH_RST, TOUCH_INT, TOUCH_I2C_FREQ, &Wire) != CT_SUCCESS) {
     Serial.println("bb_captouch init failed");
   } else {
@@ -321,32 +364,27 @@ void setup() {
   }
   touch.setOrientation(0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-  
-  // Create a display object
+  // Création de l'affichage TFT via TFT_eSPI
   lv_display_t * disp;
-  // Initialize the TFT display using the TFT_eSPI library
   disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
   lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
-    
-  // Initialize an LVGL input device object (Touchscreen)
+
+  // Périphérique d'entrée LVGL (tactile)
   lv_indev_t * indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-  // Set the callback function to read Touchscreen input
   lv_indev_set_read_cb(indev, touchscreen_read);
 
-  // Function to draw the GUI (text, buttons and sliders)
+  // Construction de l'interface graphique
   lv_create_main_gui();
 
+  // Connexion WiFi + récupération météo initiale
   connectWiFi();
   fetchWeather();
-
-  char meteo_buf[64];
-  snprintf(meteo_buf, sizeof(meteo_buf), "%.1f°C - %s", weather_temp, weather_text.c_str());
-  lv_label_set_text(header_title, meteo_buf);
+  updateWeatherDisplay();
 }
 
 void loop() {
-  lv_task_handler();  // let the GUI do its work
-  lv_tick_inc(5);     // tell LVGL how much time has passed
-  delay(5);           // let this time pass
+  lv_task_handler();  // laisse LVGL gérer l'interface
+  lv_tick_inc(5);     // informe LVGL du temps écoulé
+  delay(5);
 }
